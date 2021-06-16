@@ -159,7 +159,7 @@ public class ReactorHandlerRegistryTest {
         reactorHandlerRegistry.update(updateReactable);
 
         Assert.assertEquals(1, reactorHandlerRegistry.getEntrypoints().size());
-        Assert.assertEquals("/new-path/", reactorHandlerRegistry.getEntrypoints().get(0).path());
+        Assert.assertEquals("/new-path/", reactorHandlerRegistry.getEntrypoints().iterator().next().path());
     }
 
     @Test

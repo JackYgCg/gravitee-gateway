@@ -36,6 +36,8 @@ import io.gravitee.repository.management.api.search.builder.PageableBuilder;
 import io.gravitee.repository.management.model.Event;
 import io.gravitee.repository.management.model.EventType;
 import io.gravitee.repository.management.model.LifecycleState;
+import io.reactivex.Flowable;
+import io.reactivex.schedulers.Schedulers;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -44,6 +46,7 @@ import org.springframework.beans.factory.annotation.Value;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.*;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BinaryOperator;
 import java.util.stream.Collectors;
@@ -58,6 +61,7 @@ import static java.util.stream.Collectors.toMap;
  */
 public class SyncManager {
 
+    private static final int PARALLELISM = ForkJoinPool.commonPool().getParallelism();
     private final Logger logger = LoggerFactory.getLogger(SyncManager.class);
 
     private static final int TIMEFRAME_BEFORE_DELAY = 10 * 60 * 1000;
@@ -144,26 +148,37 @@ public class SyncManager {
     private void synchronizeApis(long nextLastRefreshAt) {
         Map<String, Event> apiEvents;
 
+        final long begin = System.currentTimeMillis();
+
         // Initial synchronization
         if (lastRefreshAt == -1) {
+            logger.info("Starting apis full synchronization");
+
             // Extract all registered APIs
             List<io.gravitee.repository.management.model.Api> apis =
                     apiRepository.search(null, new ApiFieldExclusionFilter.Builder()
                             .excludeDefinition()
                             .excludePicture().build());
 
-            // Get last event by API
-            apiEvents = apis
-                    .stream()
-                    .map(api -> getLastApiEvent(api.getId()))
-                    .filter(Objects::nonNull)
-                    .collect(
-                            toMap(
-                                    event -> event.getProperties().get(Event.EventProperties.API_ID.getValue()),
-                                    event -> event
-                            )
-                    );
+            final ExecutorService executor = createExecutor();
+
+            Flowable.fromIterable(apis)
+                    .parallel(PARALLELISM)
+                    .runOn(Schedulers.from(executor))
+                    .map(api -> {
+                        processApiEvent(api.getId(), getLastApiEvent(api.getId()));
+                        return api;
+                    })
+                    .sequential()
+                    .toList()
+                    .blockingGet();
+
+            executor.shutdown();
+
+            logger.info("Apis full synchronization done in {}ms", (System.currentTimeMillis() - begin));
         } else {
+            logger.debug("Starting apis delta synchronization");
+
             // Get latest API events
             List<Event> events = getLatestApiEvents(nextLastRefreshAt);
 
@@ -175,31 +190,45 @@ public class SyncManager {
                                     event -> event.getProperties().get(Event.EventProperties.API_ID.getValue()),
                                     event -> event,
                                     BinaryOperator.maxBy(comparing(Event::getCreatedAt))));
-        }
 
-        // Then, compute events
-        computeApiEvents(apiEvents);
+            // Then, compute events
+            computeApiEvents(apiEvents);
+            logger.debug("Apis delta synchronization done in {}ms", (System.currentTimeMillis() - begin));
+        }
+    }
+
+    private ExecutorService createExecutor() {
+        return Executors.newFixedThreadPool(PARALLELISM, new ThreadFactory() {
+            private int counter = 0;
+
+            @Override
+            public Thread newThread(Runnable r) {
+                return new Thread(r, "gio.sync-manager-" + counter++);
+            }
+        });
     }
 
     private void synchronizeDictionaries(long nextLastRefreshAt) throws Exception {
         Map<String, Event> dictionaryEvents;
 
+        final long begin = System.currentTimeMillis();
+
         // Initial synchronization
         if (lastRefreshAt == -1) {
+            logger.info("Starting dictionaries full synchronization");
             Set<io.gravitee.repository.management.model.Dictionary> dictionaries = dictionaryRepository.findAll();
 
             // Get last event by dictionary
-            dictionaryEvents = dictionaries
-                    .stream()
-                    .map(api -> getLastDictionaryEvent(api.getId()))
-                    .filter(Objects::nonNull)
-                    .collect(
-                            toMap(
-                                    event -> event.getProperties().get(Event.EventProperties.DICTIONARY_ID.getValue()),
-                                    event -> event
-                            )
-                    );
+            dictionaries.forEach(dictionary -> {
+                final Event event = getLastDictionaryEvent(dictionary.getId());
+                if (event != null) {
+                    processDictionaryEvent(event.getProperties().get(Event.EventProperties.DICTIONARY_ID.getValue()), event);
+                }
+            });
+            logger.info("Dictionaries full synchronization done in {}ms", (System.currentTimeMillis() - begin));
         } else {
+            logger.debug("Dictionaries apis delta synchronization");
+
             // Get latest dictionary events
             List<Event> events = getLatestDictionaryEvents(nextLastRefreshAt);
 
@@ -211,66 +240,76 @@ public class SyncManager {
                                     event -> event.getProperties().get(Event.EventProperties.DICTIONARY_ID.getValue()),
                                     event -> event,
                                     BinaryOperator.maxBy(comparing(Event::getCreatedAt))));
-        }
 
-        // Then, compute events
-        computeDictionaryEvents(dictionaryEvents);
+            // Then, compute events
+            computeDictionaryEvents(dictionaryEvents);
+            logger.debug("Dictionaries delta synchronization done in {}ms", (System.currentTimeMillis() - begin));
+        }
     }
 
     private void computeDictionaryEvents(Map<String, Event> dictionaryEvents) {
-        dictionaryEvents.forEach((dictionaryId, event) -> {
-            switch (event.getType()) {
-                case UNPUBLISH_DICTIONARY:
-                    dictionaryManager.undeploy(dictionaryId);
-                    break;
-                case PUBLISH_DICTIONARY:
-                    try {
-                        // Read dictionary definition from event
-                        Dictionary dictionary = objectMapper.readValue(event.getPayload(), Dictionary.class);
-                        dictionaryManager.deploy(dictionary);
-                    } catch (IOException ioe) {
-                        logger.error("Error while determining deployed dictionaries into events payload", ioe);
-                    }
-                    break;
-            }
-        });
+        dictionaryEvents.forEach(this::processDictionaryEvent);
+    }
+
+    private void processDictionaryEvent(String dictionaryId, Event event) {
+        switch (event.getType()) {
+            case UNPUBLISH_DICTIONARY:
+                dictionaryManager.undeploy(dictionaryId);
+                break;
+            case PUBLISH_DICTIONARY:
+                try {
+                    // Read dictionary definition from event
+                    Dictionary dictionary = objectMapper.readValue(event.getPayload(), Dictionary.class);
+                    dictionaryManager.deploy(dictionary);
+                } catch (IOException ioe) {
+                    logger.error("Error while determining deployed dictionaries into events payload", ioe);
+                }
+                break;
+        }
     }
 
     private void computeApiEvents(Map<String, Event> apiEvents) {
-        apiEvents.forEach((apiId, apiEvent) -> {
-            try {
-                switch (apiEvent.getType()) {
-                    case UNPUBLISH_API:
-                    case STOP_API:
-                        apiManager.unregister(apiId);
-                        break;
-                    case START_API:
-                    case PUBLISH_API:
-                        try {
-                            // Read API definition from event
-                            io.gravitee.repository.management.model.Api eventPayload =
-                                    objectMapper.readValue(apiEvent.getPayload(), io.gravitee.repository.management.model.Api.class);
+        apiEvents.forEach(this::processApiEvent);
+    }
 
-                            io.gravitee.definition.model.Api eventApiDefinition =
-                                    objectMapper.readValue(eventPayload.getDefinition(), io.gravitee.definition.model.Api.class);
+    private void processApiEvent(String apiId, Event apiEvent) {
+        if(apiEvent == null) {
+            // There is no api event to process.
+            return;
+        }
 
-                            // Update definition with required information for deployment phase
-                            final Api api = new Api(eventApiDefinition);
-                            api.setEnabled(eventPayload.getLifecycleState() == LifecycleState.STARTED);
-                            api.setDeployedAt(eventPayload.getDeployedAt());
+        try {
+            switch (apiEvent.getType()) {
+                case UNPUBLISH_API:
+                case STOP_API:
+                    apiManager.unregister(apiId);
+                    break;
+                case START_API:
+                case PUBLISH_API:
+                    try {
+                        // Read API definition from event
+                        io.gravitee.repository.management.model.Api eventPayload =
+                                objectMapper.readValue(apiEvent.getPayload(), io.gravitee.repository.management.model.Api.class);
 
-                            enhanceWithData(api);
+                        io.gravitee.definition.model.Api eventApiDefinition =
+                                objectMapper.readValue(eventPayload.getDefinition(), io.gravitee.definition.model.Api.class);
 
-                            apiManager.register(api);
-                        } catch (Exception e) {
-                            logger.error("Error while determining deployed APIs store into events payload", e);
-                        }
-                        break;
-                }
-            } catch (Throwable t) {
-                logger.error("An unexpected error occurs while managing the deployment of API id[{}]", apiId, t);
+                        // Update definition with required information for deployment phase
+                        final Api api = new Api(eventApiDefinition);
+                        api.setEnabled(eventPayload.getLifecycleState() == LifecycleState.STARTED);
+                        api.setDeployedAt(eventPayload.getDeployedAt());
+
+                        enhanceWithData(api);
+
+                        apiManager.register(api);
+                    } catch (Exception e) {
+                        logger.error("Error while determining deployed APIs store into events payload", e);
+                    }
+                    break;
             }
-        });
+        } catch (Throwable t) {
+            logger.error("An unexpected error occurs while managing the deployment of API id[{}]", apiId, t);
+        }
     }
 
     private Event getLastDictionaryEvent(final String dictionary) {
@@ -289,7 +328,7 @@ public class SyncManager {
         final EventCriteria.Builder builder = new EventCriteria.Builder()
                 .types(EventType.PUBLISH_DICTIONARY, EventType.UNPUBLISH_DICTIONARY)
                 // Search window is extended by 5 seconds for each sync error to ensure that we are never missing data
-                .from(lastRefreshAt - TIMEFRAME_BEFORE_DELAY - (5000 * errors) )
+                .from(lastRefreshAt - TIMEFRAME_BEFORE_DELAY - (5000 * errors))
                 .to(nextLastRefreshAt + TIMEFRAME_AFTER_DELAY);
 
         return eventRepository.search(builder.build());
@@ -299,7 +338,7 @@ public class SyncManager {
         final EventCriteria.Builder builder = new EventCriteria.Builder()
                 .types(EventType.PUBLISH_API, EventType.UNPUBLISH_API, EventType.START_API, EventType.STOP_API)
                 // Search window is extended by 5 seconds for each sync error to ensure that we are never missing data
-                .from(lastRefreshAt - TIMEFRAME_BEFORE_DELAY - (5000 * errors) )
+                .from(lastRefreshAt - TIMEFRAME_BEFORE_DELAY - (5000 * errors))
                 .to(nextLastRefreshAt + TIMEFRAME_AFTER_DELAY);
 
         return eventRepository.search(builder.build());
@@ -311,7 +350,7 @@ public class SyncManager {
                         .property(Event.EventProperties.API_ID.getValue(), api);
 
         List<Event> events = eventRepository.search(eventCriteriaBuilder
-                .types(EventType.PUBLISH_API, EventType.UNPUBLISH_API, EventType.START_API, EventType.STOP_API).build(),
+                        .types(EventType.PUBLISH_API, EventType.UNPUBLISH_API, EventType.START_API, EventType.STOP_API).build(),
                 new PageableBuilder().pageNumber(0).pageSize(1).build()).getContent();
 
         return (!events.isEmpty()) ? events.get(0) : null;

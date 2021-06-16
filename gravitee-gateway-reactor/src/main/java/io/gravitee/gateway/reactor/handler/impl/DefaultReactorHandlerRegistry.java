@@ -23,6 +23,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -37,10 +39,9 @@ public class DefaultReactorHandlerRegistry implements ReactorHandlerRegistry {
     @Autowired
     private ReactorHandlerFactoryManager handlerFactoryManager;
 
-    private final Map<Reactable, ReactorHandler> handlers = new HashMap<>();
-    private final Map<Reactable, List<HandlerEntrypoint>> entrypointByReactable = new HashMap<>();
-
-    private final List<HandlerEntrypoint> registeredEntrypoints = new ArrayList<>();
+    private final Map<Reactable, ReactorHandler> handlers = new ConcurrentHashMap<>();
+    private final Map<Reactable, List<HandlerEntrypoint>> entrypointByReactable = new ConcurrentHashMap<>();
+    private final Set<HandlerEntrypoint> registeredEntrypoints = new ConcurrentSkipListSet<>(new PriorityComparator());
 
     @Override
     public void create(Reactable reactable) {
@@ -87,7 +88,6 @@ public class DefaultReactorHandlerRegistry implements ReactorHandlerRegistry {
 
         entrypointByReactable.put(handler.reactable(), reactableEntrypoints);
         registeredEntrypoints.addAll(reactableEntrypoints);
-        registeredEntrypoints.sort(Comparator.comparingInt(Entrypoint::priority).reversed());
     }
 
     private ReactorHandler prepare(Reactable reactable) {
@@ -158,7 +158,6 @@ public class DefaultReactorHandlerRegistry implements ReactorHandlerRegistry {
                 handler.stop();
                 List<HandlerEntrypoint> previousEntrypoints = entrypointByReactable.remove(handler.reactable());
                 registeredEntrypoints.removeAll(previousEntrypoints);
-                registeredEntrypoints.sort(Comparator.comparingInt(Entrypoint::priority).reversed());
 
                 if (remove) {
                     handlers.remove(reactable);
@@ -171,7 +170,23 @@ public class DefaultReactorHandlerRegistry implements ReactorHandlerRegistry {
     }
 
     @Override
-    public List<HandlerEntrypoint> getEntrypoints() {
+    public Collection<HandlerEntrypoint> getEntrypoints() {
         return registeredEntrypoints;
+    }
+
+    private static class PriorityComparator implements Comparator<HandlerEntrypoint> {
+
+        @Override
+        public int compare(HandlerEntrypoint o1, HandlerEntrypoint o2) {
+            if(o1.equals(o2)) {
+                return 0;
+            }
+
+            if(o1.priority() <= o2.priority()) {
+                return 1;
+            }
+
+            return -1;
+        }
     }
 }
