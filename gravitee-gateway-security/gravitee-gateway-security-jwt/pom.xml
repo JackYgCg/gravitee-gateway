@@ -39,9 +39,8 @@
         </dependency>
 
         <dependency>
-            <groupId>io.gravitee.repository</groupId>
+            <groupId>io.gravitee.apim.repository</groupId>
             <artifactId>gravitee-repository</artifactId>
-            <version>${gravitee-repository.version}</version>
             <scope>provided</scope>
         </dependency>
 

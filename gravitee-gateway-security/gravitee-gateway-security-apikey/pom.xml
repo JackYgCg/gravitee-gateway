@@ -38,8 +38,9 @@
             <version>${project.version}</version>
         </dependency>
         <dependency>
-            <groupId>io.gravitee.repository</groupId>
+            <groupId>io.gravitee.apim.repository</groupId>
             <artifactId>gravitee-repository</artifactId>
+            <scope>provided</scope>
         </dependency>
     </dependencies>
 </project>
