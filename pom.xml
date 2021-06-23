@@ -81,8 +81,8 @@
 
             <dependency>
                 <groupId>io.gravitee.apim.repository</groupId>
-                <artifactId>gravitee-repository</artifactId>
-                <version>${gravitee-repository.version}</version>
+                <artifactId>gravitee-apim-repository-api</artifactId>
+                <version>${gravitee-apim-repository-api.version}</version>
             </dependency>
 
             <dependency>
@@ -261,7 +261,7 @@
         <gravitee-definition.version>1.28.0</gravitee-definition.version>
         <gravitee-common.version>1.19.2</gravitee-common.version>
         <gravitee-expression-language.version>1.4.2</gravitee-expression-language.version>
-        <gravitee-repository.version>19.7.83</gravitee-repository.version>
+        <gravitee-apim-repository-api.version>19.7.84-SNAPSHOT</gravitee-apim-repository-api.version>
         <gravitee-plugin-resource.version>1.16.0</gravitee-plugin-resource.version>
         <gravitee-plugin-core.version>1.16.0</gravitee-plugin-core.version>
         <gravitee-plugin-policy.version>1.16.0</gravitee-plugin-policy.version>

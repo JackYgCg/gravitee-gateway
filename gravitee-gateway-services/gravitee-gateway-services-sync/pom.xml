@@ -52,7 +52,7 @@
 
         <dependency>
             <groupId>io.gravitee.apim.repository</groupId>
-            <artifactId>gravitee-repository</artifactId>
+            <artifactId>gravitee-apim-repository-api</artifactId>
             <scope>provided</scope>
         </dependency>
 
